@@ -10,7 +10,8 @@ mkdir -p "$RAMDIR" "$TLS_DIR"
 chmod 700 "$RAMDIR" "$TLS_DIR"
 
 MODEL="${MODEL:-TrevorJS/gemma-4-26B-A4B-it-uncensored}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+MODEL_REVISION="${MODEL_REVISION:-fc582b971b5b6f7738d311d7ea2b1b7b446ff0a1}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-50000}"
 GPU_MEM_UTIL="${GPU_MEMORY_UTILIZATION:-0.90}"
 GATEWAY_PORT="${GATEWAY_PORT:-8443}"
 export VLLM_UDS
@@ -30,7 +31,7 @@ echo "[SECURITY] $TLS_LINE"
 echo "[SECURITY] Verify/pin this fingerprint out-of-band before sending private chat data."
 
 HELP="$(vllm serve --help 2>&1 || true)"
-VARGS=(serve "$MODEL" --uds "$VLLM_UDS" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization "$GPU_MEM_UTIL" --api-key "$VLLM_KEY")
+VARGS=(serve "$MODEL" --revision "$MODEL_REVISION" --uds "$VLLM_UDS" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization "$GPU_MEM_UTIL" --api-key "$VLLM_KEY")
 if grep -q -- '--disable-uvicorn-access-log' <<<"$HELP"; then VARGS+=(--disable-uvicorn-access-log); fi
 if grep -q -- '--disable-log-stats' <<<"$HELP"; then VARGS+=(--disable-log-stats); fi
 if grep -q -- '--no-enable-log-requests' <<<"$HELP"; then VARGS+=(--no-enable-log-requests); fi
