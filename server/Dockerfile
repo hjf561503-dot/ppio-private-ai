@@ -24,7 +24,9 @@ WORKDIR /opt/private-ai
 COPY requirements.txt /opt/private-ai/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /opt/private-ai/requirements.txt
 COPY gateway.py make_ephemeral_tls.py entrypoint.sh set_admin_totp.sh /opt/private-ai/
-RUN mkdir -p /home/vllm/.cache/huggingface /home/vllm/.cache/vllm \
+RUN python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(encoding='utf-8'), filename=p) for p in ('/opt/private-ai/gateway.py','/opt/private-ai/make_ephemeral_tls.py')]" \
+    && bash -n /opt/private-ai/entrypoint.sh /opt/private-ai/set_admin_totp.sh \
+    && mkdir -p /home/vllm/.cache/huggingface /home/vllm/.cache/vllm \
     && chown -R 2000:0 /home/vllm /opt/private-ai \
     && chmod 700 /home/vllm /home/vllm/.cache /home/vllm/.cache/huggingface /home/vllm/.cache/vllm \
     && chmod 700 /opt/private-ai/entrypoint.sh /opt/private-ai/set_admin_totp.sh \
