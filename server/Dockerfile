@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:latest
+FROM vllm/vllm-openai:v0.26.0
 
 LABEL org.opencontainers.image.title="PPIO H20 Private AI Gateway"
 LABEL org.opencontainers.image.description="Privacy-hardened self-hosted vLLM gateway"
