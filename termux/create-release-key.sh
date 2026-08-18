@@ -22,25 +22,10 @@ command -v keytool >/dev/null 2>&1 || {
 
 echo "Create the long-term APK release signing key locally on this Android device."
 echo "The private key will NOT be uploaded to GitHub or placed in the repository."
-printf "Enter a strong ASCII password for the encrypted PKCS#12 keystore: "
-IFS= read -r -s KS_PASS
 echo
-printf "Enter it again: "
-IFS= read -r -s KS_PASS_2
+echo "keytool will now ask for the encrypted keystore password interactively."
+echo "Use a strong password (recommended: 16+ ASCII characters) and do not send it to anyone."
 echo
-
-if [ "$KS_PASS" != "$KS_PASS_2" ]; then
-  unset KS_PASS KS_PASS_2
-  echo "Passwords do not match." >&2
-  exit 2
-fi
-if [ "${#KS_PASS}" -lt 16 ]; then
-  unset KS_PASS KS_PASS_2
-  echo "Use at least 16 characters." >&2
-  exit 2
-fi
-unset KS_PASS_2
-export KS_PASS
 
 keytool -genkeypair \
   -keystore "$KEYSTORE" \
@@ -50,31 +35,24 @@ keytool -genkeypair \
   -keysize 4096 \
   -sigalg SHA256withRSA \
   -validity 36500 \
-  -dname "CN=PPIO Private AI Release,O=Private" \
-  -storepass:env KS_PASS \
-  -keypass:env KS_PASS
+  -dname "CN=PPIO Private AI Release,O=Private"
 
 chmod 600 "$KEYSTORE"
 
 CERT_FILE="$KEY_DIR/release-certificate.pem"
+echo
+echo "Exporting the PUBLIC certificate. keytool may ask for the keystore password once more."
 keytool -exportcert -rfc \
   -keystore "$KEYSTORE" \
   -storetype PKCS12 \
   -alias "$ALIAS" \
-  -storepass:env KS_PASS \
   -file "$CERT_FILE" >/dev/null
 chmod 644 "$CERT_FILE"
 
 FINGERPRINT_FILE="$KEY_DIR/release-certificate-sha256.txt"
-keytool -list -v \
-  -keystore "$KEYSTORE" \
-  -storetype PKCS12 \
-  -alias "$ALIAS" \
-  -storepass:env KS_PASS \
+keytool -printcert -file "$CERT_FILE" \
   | awk '/SHA256:/{print; exit}' | tee "$FINGERPRINT_FILE"
 chmod 644 "$FINGERPRINT_FILE"
-
-unset KS_PASS
 
 echo
 echo "Created: $KEYSTORE"
