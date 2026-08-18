@@ -16,16 +16,18 @@ Python, HTTP libraries, tokenizers and GPU runtimes may create temporary in-memo
 2. The server's public entry point is TLS port 8443 only.
 3. vLLM has no public or loopback TCP API port; its OpenAI API uses a Unix-domain socket located in `/dev/shm`.
 4. TLS identity is per-boot and RAM-only. The client must pin the certificate fingerprint out-of-band before sending private data.
-5. Session establishment is device-signed and includes timestamp, nonce and request-body hash. The current prototype also signs chat requests; the production chat protocol should move to authenticated per-session sequence numbers so StrongBox authentication is not required for every message.
-6. Session confidentiality adds X25519 + HKDF-SHA256 + AES-256-GCM inside TLS.
-7. No chat database is implemented on the server.
-8. Prompt/output/access/stat logging is explicitly disabled where supported by the pinned vLLM version.
-9. vLLM and Hugging Face telemetry are explicitly opted out through environment variables.
-10. Core dumps and Python bytecode persistence are disabled.
-11. The container runs as a non-root user after image setup.
-12. Admin lockdown requires device authentication plus TOTP. A production lockdown path should also terminate the vLLM process so its KV cache/VRAM allocations are released; deletion of cloud-provider copies cannot be guaranteed on an ordinary H20 instance.
-13. A failed/unknown login never destroys storage; this prevents attackers from turning authentication failure into a remote self-destruct denial-of-service primitive.
-14. Remote media URL fetching must remain disabled/rejected until a deliberate media allowlist is implemented. vLLM HTTP media redirects are disabled by default in this image.
+5. Session establishment is device-signed and includes timestamp, nonce and request-body hash. Signed nonces are atomically reserved after signature verification to close concurrent replay races.
+6. Session confidentiality adds X25519 + HKDF-SHA256 + AES-256-GCM inside TLS. The gateway also rejects reuse of a client AEAD nonce within one session.
+7. The current prototype signs every chat request with the StrongBox identity. Before the production chat UI is finalized, this should be changed to a session-authenticated sequence protocol so the user is not forced through StrongBox authentication for every message.
+8. No chat database is implemented on the server.
+9. Prompt/output/access/stat logging is explicitly disabled where supported by the pinned vLLM version.
+10. vLLM and Hugging Face telemetry are explicitly opted out through environment variables.
+11. Core dumps and Python bytecode persistence are disabled.
+12. The container runs as a non-root user after image setup.
+13. Admin lockdown requires device authentication plus TOTP, clears sessions, destroys the RAM-only vLLM credential, and sends SIGTERM to the serving vLLM process so its ordinary process/GPU allocations are released. This is not a guarantee of erasure against a malicious hypervisor or cloud-provider snapshot.
+14. A failed/unknown login never destroys storage; this prevents attackers from turning authentication failure into a remote self-destruct denial-of-service primitive.
+15. Remote HTTP/HTTPS/file media fetching is rejected at the gateway until a deliberate media allowlist is implemented. vLLM HTTP media redirects are also disabled.
+16. Request bodies are streamed through an application size cap instead of being read without a bound.
 
 ## Intentionally not persisted by this application
 
