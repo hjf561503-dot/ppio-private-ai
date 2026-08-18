@@ -1,5 +1,8 @@
 FROM vllm/vllm-openai:latest
 
+LABEL org.opencontainers.image.title="PPIO H20 Private AI Gateway"
+LABEL org.opencontainers.image.description="Privacy-hardened self-hosted vLLM gateway"
+
 USER root
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
