@@ -6,8 +6,9 @@ import json
 import os
 import resource
 import secrets
+import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 import httpx
@@ -24,22 +25,27 @@ os.umask(0o077)
 APP_NAME = "PPIO H20 Private AI Gateway"
 VLLM_UDS = os.environ.get("VLLM_UDS", "/dev/shm/private-ai/vllm.sock")
 VLLM_KEY_FILE = os.environ.get("VLLM_KEY_FILE", "/dev/shm/private-ai/vllm.key")
+VLLM_PID_FILE = os.environ.get("VLLM_PID_FILE", "/dev/shm/private-ai/vllm.pid")
 TRUSTED_DEVICES_FILE = os.environ.get("TRUSTED_DEVICES_FILE", "/etc/private-ai/trusted_devices.json")
 TRUSTED_DEVICES_JSON_B64 = os.environ.get("TRUSTED_DEVICES_JSON_B64", "")
 ADMIN_TOTP_FILE = os.environ.get("ADMIN_TOTP_FILE", "/dev/shm/private-ai/admin_totp.secret")
 MAX_CLOCK_SKEW = int(os.environ.get("MAX_CLOCK_SKEW", "90"))
 SESSION_TTL = int(os.environ.get("SESSION_TTL", "1800"))
-MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(8 * 1024 * 1024)))
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(2 * 1024 * 1024)))
 MAX_FAILURES_PER_MIN = int(os.environ.get("MAX_FAILURES_PER_MIN", "12"))
 MAX_SESSIONS = int(os.environ.get("MAX_SESSIONS", "8"))
+MAX_AEAD_NONCES_PER_SESSION = int(os.environ.get("MAX_AEAD_NONCES_PER_SESSION", "4096"))
 
 app = FastAPI(title=APP_NAME, docs_url=None, redoc_url=None, openapi_url=None)
+
 
 @dataclass
 class Session:
     device_id: str
     key: bytes
     expires_at: float
+    seen_aead_nonces: set[bytes] = field(default_factory=set)
+
 
 sessions: Dict[str, Session] = {}
 seen_nonces: Dict[str, float] = {}
@@ -59,7 +65,10 @@ def _load_trusted_devices():
             with open(TRUSTED_DEVICES_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except FileNotFoundError:
-            raise RuntimeError("No trusted devices configured. Set TRUSTED_DEVICES_JSON_B64 or mount trusted_devices.json")
+            raise RuntimeError(
+                "No trusted devices configured. Set TRUSTED_DEVICES_JSON_B64 or mount trusted_devices.json"
+            )
+
     devices = {}
     for device_id, item in raw.items():
         if not item.get("enabled", True):
@@ -72,6 +81,7 @@ def _load_trusted_devices():
     if not devices:
         raise RuntimeError("No enabled trusted device")
     return devices
+
 
 TRUSTED_DEVICES = _load_trusted_devices()
 
@@ -92,12 +102,53 @@ def _canonical(method: str, path: str, timestamp: str, nonce: str, body: bytes) 
     return "\n".join([method.upper(), path, timestamp, nonce, _sha256(body)]).encode("utf-8")
 
 
+async def _read_limited_body(request: Request) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="body too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid content-length")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="body too large")
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _reject_remote_media_urls(payload) -> None:
+    """Deny server-side URL/file fetching until an explicit media allowlist exists."""
+    media_keys = {"image_url", "audio_url", "video_url", "file_url"}
+
+    def remote_url(value) -> bool:
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            return lowered.startswith(("http://", "https://", "file://"))
+        if isinstance(value, dict):
+            return remote_url(value.get("url", ""))
+        return False
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in media_keys and remote_url(value):
+                    raise HTTPException(status_code=400, detail="remote media URLs are disabled")
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+
+
 async def _prune_state():
     now = time.time()
     async with state_lock:
         for sid in [k for k, v in sessions.items() if v.expires_at <= now]:
-            sess = sessions.pop(sid)
-            del sess
+            sessions.pop(sid, None)
         for nonce in [k for k, exp in seen_nonces.items() if exp <= now]:
             seen_nonces.pop(nonce, None)
         for k in list(failures):
@@ -147,13 +198,6 @@ async def _verify_signed_request(request: Request, body: bytes):
         await _record_failure(device_id)
         raise HTTPException(status_code=401, detail="bad nonce")
 
-    await _prune_state()
-    async with state_lock:
-        replay = nonce in seen_nonces
-    if replay:
-        await _record_failure(device_id)
-        raise HTTPException(status_code=409, detail="replay blocked")
-
     canonical = _canonical(request.method, request.url.path, timestamp, nonce, body)
     try:
         key.verify(_b64d(signature_b64), canonical, ec.ECDSA(hashes.SHA256()))
@@ -161,8 +205,20 @@ async def _verify_signed_request(request: Request, body: bytes):
         await _record_failure(device_id)
         raise HTTPException(status_code=401, detail="unauthorized")
 
+    # Verify first, then atomically check+reserve the signed nonce. This closes
+    # the race where two concurrent copies of one valid signed request could
+    # both pass a pre-verification replay check.
+    await _prune_state()
     async with state_lock:
-        seen_nonces[nonce] = time.time() + MAX_CLOCK_SKEW * 2
+        if nonce in seen_nonces:
+            replay = True
+        else:
+            seen_nonces[nonce] = time.time() + MAX_CLOCK_SKEW * 2
+            replay = False
+    if replay:
+        await _record_failure(device_id)
+        raise HTTPException(status_code=409, detail="replay blocked")
+
     return device_id
 
 
@@ -182,14 +238,20 @@ def _read_vllm_key() -> str:
 
 def _totp_code(secret_b32: str, counter: int, digits: int = 6) -> str:
     import struct
-    normalized = ''.join(secret_b32.strip().split()).upper()
-    padding = '=' * ((8 - len(normalized) % 8) % 8)
+
+    normalized = "".join(secret_b32.strip().split()).upper()
+    padding = "=" * ((8 - len(normalized) % 8) % 8)
     key = base64.b32decode(normalized + padding, casefold=True)
-    msg = struct.pack('>Q', counter)
+    msg = struct.pack(">Q", counter)
     digest = hmac.new(key, msg, hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
-    binary = ((digest[offset] & 0x7F) << 24) | ((digest[offset+1] & 0xFF) << 16) | ((digest[offset+2] & 0xFF) << 8) | (digest[offset+3] & 0xFF)
-    return str(binary % (10 ** digits)).zfill(digits)
+    binary = (
+        ((digest[offset] & 0x7F) << 24)
+        | ((digest[offset + 1] & 0xFF) << 16)
+        | ((digest[offset + 2] & 0xFF) << 8)
+        | (digest[offset + 3] & 0xFF)
+    )
+    return str(binary % (10**digits)).zfill(digits)
 
 
 def _verify_totp(secret_b32: str, code: str, window: int = 1, step: int = 30) -> bool:
@@ -211,6 +273,16 @@ def _read_totp_secret() -> str | None:
         return None
 
 
+def _terminate_vllm() -> bool:
+    try:
+        with open(VLLM_PID_FILE, "r", encoding="ascii") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except (FileNotFoundError, ProcessLookupError, ValueError, PermissionError):
+        return False
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": not locked_down, "mode": "locked" if locked_down else "ready"}
@@ -221,7 +293,8 @@ async def session_open(request: Request):
     global locked_down
     if locked_down:
         raise HTTPException(status_code=423, detail="locked")
-    body = await request.body()
+
+    body = await _read_limited_body(request)
     device_id = await _verify_signed_request(request, body)
     try:
         payload = json.loads(body)
@@ -239,11 +312,13 @@ async def session_open(request: Request):
     session_id = secrets.token_urlsafe(32)
     key = _derive_session_key(shared, session_id, device_id)
     expires = time.time() + SESSION_TTL
+
     async with state_lock:
         if len(sessions) >= MAX_SESSIONS:
             oldest = min(sessions, key=lambda sid: sessions[sid].expires_at)
             sessions.pop(oldest, None)
         sessions[session_id] = Session(device_id=device_id, key=key, expires_at=expires)
+
     del server_priv, shared
     return {
         "session_id": session_id,
@@ -259,7 +334,8 @@ async def chat(request: Request):
     global locked_down
     if locked_down:
         raise HTTPException(status_code=423, detail="locked")
-    outer = await request.body()
+
+    outer = await _read_limited_body(request)
     device_id = await _verify_signed_request(request, outer)
 
     try:
@@ -270,24 +346,50 @@ async def chat(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="bad envelope")
 
-    async with state_lock:
-        sess = sessions.get(session_id)
-    if sess is None or sess.expires_at <= time.time() or not hmac.compare_digest(sess.device_id, device_id):
-        raise HTTPException(status_code=401, detail="invalid session")
     if len(nonce) != 12:
         raise HTTPException(status_code=400, detail="bad nonce")
+
+    await _prune_state()
+    async with state_lock:
+        sess = sessions.get(session_id)
+        if sess is None or sess.expires_at <= time.time() or not hmac.compare_digest(sess.device_id, device_id):
+            invalid_session = True
+        else:
+            invalid_session = False
+            if nonce in sess.seen_aead_nonces:
+                raise HTTPException(status_code=409, detail="AEAD nonce reuse blocked")
+            if len(sess.seen_aead_nonces) >= MAX_AEAD_NONCES_PER_SESSION:
+                raise HTTPException(status_code=409, detail="session nonce budget exhausted; open a new session")
+            sess.seen_aead_nonces.add(nonce)
+
+    if invalid_session:
+        raise HTTPException(status_code=401, detail="invalid session")
 
     aad = ("chat:" + session_id + ":" + device_id).encode("utf-8")
     try:
         plaintext = AESGCM(sess.key).decrypt(nonce, ciphertext, aad)
     except InvalidTag:
+        async with state_lock:
+            current = sessions.get(session_id)
+            if current is not None:
+                current.seen_aead_nonces.discard(nonce)
         await _record_failure(device_id)
         raise HTTPException(status_code=401, detail="decryption failed")
 
     try:
+        try:
+            parsed = json.loads(plaintext)
+        except Exception:
+            raise HTTPException(status_code=400, detail="decrypted chat body is not valid JSON")
+        _reject_remote_media_urls(parsed)
+
         vllm_key = _read_vllm_key()
         transport = httpx.AsyncHTTPTransport(uds=VLLM_UDS)
-        async with httpx.AsyncClient(transport=transport, base_url="http://vllm", timeout=httpx.Timeout(300.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://vllm",
+            timeout=httpx.Timeout(300.0, connect=5.0),
+        ) as client:
             r = await client.post(
                 "/v1/chat/completions",
                 content=plaintext,
@@ -299,29 +401,25 @@ async def chat(request: Request):
         response_plain = r.content
         status_code = r.status_code
     finally:
-        if plaintext:
-            tmp = bytearray(plaintext)
-            for i in range(len(tmp)):
-                tmp[i] = 0
-            del tmp
+        # CPython and downstream libraries may retain internal copies; dropping
+        # references is best-effort only and is not claimed as secure RAM erasure.
         plaintext = b""
 
     resp_nonce = secrets.token_bytes(12)
     resp_aad = ("response:" + session_id + ":" + device_id).encode("utf-8")
     resp_cipher = AESGCM(sess.key).encrypt(resp_nonce, response_plain, resp_aad)
-    if response_plain:
-        tmp2 = bytearray(response_plain)
-        for i in range(len(tmp2)):
-            tmp2[i] = 0
-        del tmp2
     response_plain = b""
+
     return Response(
-        content=json.dumps({
-            "session_id": session_id,
-            "nonce": _b64e(resp_nonce),
-            "ciphertext": _b64e(resp_cipher),
-            "upstream_status": status_code,
-        }, separators=(",", ":")),
+        content=json.dumps(
+            {
+                "session_id": session_id,
+                "nonce": _b64e(resp_nonce),
+                "ciphertext": _b64e(resp_cipher),
+                "upstream_status": status_code,
+            },
+            separators=(",", ":"),
+        ),
         media_type="application/json",
         status_code=200,
     )
@@ -330,11 +428,13 @@ async def chat(request: Request):
 @app.post("/admin/lockdown")
 async def admin_lockdown(request: Request):
     global locked_down
-    body = await request.body()
+
+    body = await _read_limited_body(request)
     await _verify_signed_request(request, body)
     totp_secret = _read_totp_secret()
     if not totp_secret:
         raise HTTPException(status_code=503, detail="admin TOTP not provisioned")
+
     code = request.headers.get("x-admin-totp", "")
     if not _verify_totp(totp_secret, code, window=1):
         await _record_failure("admin-totp")
@@ -344,6 +444,7 @@ async def admin_lockdown(request: Request):
         locked_down = True
         sessions.clear()
         seen_nonces.clear()
+
     try:
         with open(VLLM_KEY_FILE, "wb") as f:
             f.write(secrets.token_bytes(96))
@@ -352,4 +453,10 @@ async def admin_lockdown(request: Request):
         os.unlink(VLLM_KEY_FILE)
     except FileNotFoundError:
         pass
-    return {"locked": True, "restart_required": True}
+
+    vllm_stop_requested = _terminate_vllm()
+    return {
+        "locked": True,
+        "restart_required": True,
+        "vllm_stop_requested": vllm_stop_requested,
+    }
