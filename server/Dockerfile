@@ -7,7 +7,8 @@ USER root
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    VLLM_LOGGING_LEVEL=ERROR
+    VLLM_LOGGING_LEVEL=ERROR \
+    VLLM_ENABLE_CUDA_COMPATIBILITY=1
 
 WORKDIR /opt/private-ai
 COPY requirements.txt /opt/private-ai/requirements.txt
