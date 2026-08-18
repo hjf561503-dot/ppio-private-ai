@@ -38,6 +38,8 @@ Privacy hardening includes:
 - Core dumps are disabled.
 - The container runs as vLLM's built-in non-root UID 2000.
 - Emergency lockdown invalidates sessions and the internal RAM-only credential; it does not expose a remote disk-wipe DoS primitive.
+- The vLLM base image is pinned to a release tag instead of `latest`.
+- The Hugging Face model revision is pinned to an immutable commit by default.
 
 See `SECURITY_MODEL.md` for the threat model.
 
@@ -47,7 +49,10 @@ Pushing `server/**` to `main` triggers `.github/workflows/build-image.yml` and p
 
 ```text
 ghcr.io/<owner>/ppio-private-ai:latest
+ghcr.io/<owner>/ppio-private-ai:<git-commit-sha>
 ```
+
+For production, prefer the immutable commit-SHA tag instead of `latest`.
 
 The workflow uses the repository-scoped `GITHUB_TOKEN`; no PAT is required in repository secrets.
 
@@ -58,7 +63,7 @@ Recommended template fields:
 ```text
 Template name: ppio-private-ai-h20
 Minimum CUDA: 12.4
-Container image: ghcr.io/<owner>/ppio-private-ai:latest
+Container image: ghcr.io/<owner>/ppio-private-ai:<immutable-build-commit-sha>
 Container command: blank
 Entrypoint: blank
 System disk: 130 GB
@@ -70,7 +75,8 @@ Environment variables:
 
 ```text
 MODEL=TrevorJS/gemma-4-26B-A4B-it-uncensored
-MAX_MODEL_LEN=32768
+MODEL_REVISION=fc582b971b5b6f7738d311d7ea2b1b7b446ff0a1
+MAX_MODEL_LEN=50000
 GPU_MEMORY_UTILIZATION=0.90
 GATEWAY_PORT=8443
 TRUSTED_DEVICES_JSON_B64=<public device configuration only>
@@ -80,7 +86,7 @@ Do not put private device keys, TOTP secrets, TLS private keys, or chat records 
 
 ## First-device provisioning
 
-`client-test/` can generate a **temporary test key** for bring-up. It is not the production identity. Production is intended to use the Android StrongBox skeleton in `android/StrongBoxIdentity.kt` so the device private key is non-exportable.
+The production Android enrollment app creates a P-256 identity in Android StrongBox, requires per-use authentication, and exports only the public enrollment bundle. The server should receive only the minimized device ID + public key configuration through `TRUSTED_DEVICES_JSON_B64`; the StrongBox private key never leaves the Android device.
 
 The per-boot TLS fingerprint is printed as:
 
