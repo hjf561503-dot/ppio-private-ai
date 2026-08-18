@@ -1,0 +1,6 @@
+{
+  "tablet-main": {
+    "enabled": true,
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ANDROID_STRONGBOX_OR_TEST_P256_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+  }
+}
