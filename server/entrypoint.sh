@@ -6,6 +6,7 @@ ulimit -c 0 || true
 RAMDIR=/dev/shm/private-ai
 TLS_DIR="$RAMDIR/tls"
 VLLM_UDS="$RAMDIR/vllm.sock"
+VLLM_PID_FILE="$RAMDIR/vllm.pid"
 mkdir -p "$RAMDIR" "$TLS_DIR"
 chmod 700 "$RAMDIR" "$TLS_DIR"
 
@@ -16,6 +17,7 @@ GPU_MEM_UTIL="${GPU_MEMORY_UTILIZATION:-0.90}"
 GATEWAY_PORT="${GATEWAY_PORT:-8443}"
 export VLLM_UDS
 export VLLM_KEY_FILE="$RAMDIR/vllm.key"
+export VLLM_PID_FILE
 export TLS_DIR
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-ERROR}"
 
@@ -42,10 +44,12 @@ if grep -q -- '--uvicorn-log-level' <<<"$HELP"; then VARGS+=(--uvicorn-log-level
 
 vllm "${VARGS[@]}" >"$RAMDIR/vllm.stdout" 2>"$RAMDIR/vllm.stderr" &
 VLLM_PID=$!
+printf '%s\n' "$VLLM_PID" > "$VLLM_PID_FILE"
+chmod 600 "$VLLM_PID_FILE"
 
 cleanup() {
   if [[ -n "${GATEWAY_PID:-}" ]]; then kill "$GATEWAY_PID" 2>/dev/null || true; fi
-  kill "$VLLM_PID" 2>/dev/null || true
+  if [[ -n "${VLLM_PID:-}" ]]; then kill "$VLLM_PID" 2>/dev/null || true; fi
   rm -rf "$RAMDIR" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
