@@ -1,16 +1,31 @@
-# Android 生产客户端说明
+# Android 客户端说明
 
-`StrongBoxIdentity.kt` 只实现生产设备身份的核心：P-256 私钥必须由 Android StrongBox 生成且不可导出，并要求生物识别/设备凭据后才能签名。
+当前已构建并正式签名的 APK 是 **StrongBox 设备登记/验证客户端**，不是完整聊天客户端。
 
-最终 App 还需要：
+实际设备身份实现位于：
 
-- 将 `publicKeyPem()` 注册到服务器 `TRUSTED_DEVICES_JSON_B64`
-- 对每个请求构造与服务器完全一致的 canonical string
-- TLS 证书 SHA-256 pin
-- 临时 X25519 会话协商
-- AES-256-GCM 加密/解密
-- 本地聊天数据库加密
-- Key Attestation 验证 StrongBox 安全级别和证书链
-- 设备撤销和恢复流程
+`android/app/src/main/java/com/hjf/ppioprivateenroll/StrongBoxManager.java`
 
-当前 `client-test/private_client.py` 用普通文件私钥，只用于把服务器跑通，**不是最终安全客户端**。
+当前安全属性：
+
+- P-256 设备私钥由 Android StrongBox 生成且不可导出。
+- `setUserAuthenticationParameters(0, ...)`：每次使用设备身份私钥都需要用户认证。
+- 使用 Android Key Attestation 生成硬件证明链。
+- 登记版本没有 `INTERNET` 权限，不能主动上传注册包。
+- 公开注册包只包含 Device ID、公钥和 Attestation 证书链，不包含私钥。
+
+## 尚未完成的生产聊天客户端
+
+真正聊天前还需要在 **同一 applicationId、同一 release 签名** 的后续 APK 更新中加入：
+
+- `INTERNET` 权限和仅连接用户指定端点的网络客户端；
+- TLS 证书 SHA-256 pin；
+- StrongBox 签名的会话建立；
+- 临时 X25519 会话协商；
+- HKDF-SHA256 + AES-256-GCM 应用层加密；
+- 严格的会话序号/nonce 防重放；
+- 本地聊天数据库加密；
+- 服务器身份/端点变更确认；
+- 设备撤销与恢复流程。
+
+`client-test/private_client.py` 使用普通文件私钥，仅用于协议联调，**不能作为生产安全客户端**。
